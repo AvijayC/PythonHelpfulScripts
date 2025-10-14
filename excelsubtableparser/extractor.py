@@ -430,7 +430,7 @@ class SubtableExtractor:
                 break
             
             # Extract row data
-            row_data = self._extract_single_row(worksheet, current_row, column_mapping)
+            row_data = self._extract_single_row(worksheet, current_row, column_mapping, config)
             
             # Check if it's a blank row
             is_blank = all(not row_data.get(col_info['header_text']) for col_info in column_mapping.values())
@@ -551,21 +551,38 @@ class SubtableExtractor:
         else:
             return cell.value
 
-    def _extract_single_row(self, worksheet, row_num: int, column_mapping: Dict) -> Dict:
-        """Extract data from a single row with proper type preservation."""
+    def _extract_single_row(self, worksheet, row_num: int, column_mapping: Dict, config: SubtableSearchConfig) -> Dict:
+        """Extract data from a single row with proper type preservation and merged cell handling."""
         row_data = {}
 
         for col_letter, col_info in column_mapping.items():
             cell = worksheet.cell(row=row_num, column=col_info['index'])
 
-            # Use the new type-preserving extraction method
-            value = self._extract_cell_value_with_type(cell)
+            # Check if this cell is part of a merged range and config allows expansion
+            value = None
+            cell_coord = f"{col_letter}{row_num}"
+
+            # Check if cell is in a merged range (only if expand_merged_cells is True)
+            if config.expand_merged_cells:
+                for merged_range in worksheet.merged_cells.ranges:
+                    if cell.coordinate in merged_range:
+                        # Get value from the top-left cell of the merged range
+                        top_left_cell = worksheet.cell(row=merged_range.min_row, column=merged_range.min_col)
+                        value = self._extract_cell_value_with_type(top_left_cell)
+
+                        # Store the original merged cell coordinate for reference
+                        row_data[f"{col_info['header_text']}_merged_from"] = f"{chr(ord('A') + merged_range.min_col - 1)}{merged_range.min_row}"
+                        break
+
+            # If not in merged range or merged cell expansion disabled, extract normally
+            if value is None:
+                value = self._extract_cell_value_with_type(cell)
 
             # Store the properly typed value
             row_data[col_info['header_text']] = value if value is not None else ""
 
             # Store cell coordinate for reference
-            row_data[f"{col_info['header_text']}_coord"] = f"{col_letter}{row_num}"
+            row_data[f"{col_info['header_text']}_coord"] = cell_coord
 
         return row_data
     

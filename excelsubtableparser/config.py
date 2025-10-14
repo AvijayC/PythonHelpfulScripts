@@ -73,3 +73,6 @@ class SubtableSearchConfig:
     max_subtables: Optional[int] = None  # Maximum number of subtables to extract (None = unlimited)
     max_blank_rows_between_subtables: int = 50  # Max blank rows to search before giving up
     combine_subtables: bool = True  # Whether to combine into single DataFrame or return list
+
+    # Merged cell handling
+    expand_merged_cells: bool = True  # If True, merged cells in data rows will propagate their value to all cells in the merged range

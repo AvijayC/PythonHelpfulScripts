@@ -22,80 +22,214 @@ class SubtableExtractor:
     
     def extract(self, sheet_name: str, config: SubtableSearchConfig) -> pd.DataFrame:
         """
-        Extract a subtable from the specified sheet using the provided configuration.
-        
+        Extract one or more subtables from the specified sheet using the provided configuration.
+
         Args:
             sheet_name: Name of the worksheet to scan
             config: Configuration defining search patterns and extraction rules
-            
+
         Returns:
-            DataFrame with extracted rows and metadata
+            DataFrame with extracted rows and metadata (or list of DataFrames if combine_subtables=False)
         """
         if sheet_name not in self.workbook.sheetnames:
             raise ValueError(f"Sheet '{sheet_name}' not found in workbook")
 
         worksheet = self.workbook[sheet_name]
 
-        # Find section header if provided
-        if config.section_header:
-            section_info = self._find_section_header(worksheet, config.section_header)
+        # If not extracting multiple, use the single extraction logic
+        if not config.extract_multiple:
+            return self._extract_single_subtable(worksheet, sheet_name, config, 1, worksheet.max_row)
+
+        # Extract multiple subtables
+        all_subtables = []
+        current_row = 1
+        subtable_index = 0
+        consecutive_blank_rows = 0
+
+        if self.debug:
+            print(f"Starting multi-subtable extraction from sheet '{sheet_name}'")
+
+        while current_row <= worksheet.max_row:
+            # Check if we've reached the maximum number of subtables
+            if config.max_subtables and subtable_index >= config.max_subtables:
+                if self.debug:
+                    print(f"Reached maximum subtable limit ({config.max_subtables})")
+                break
+
+            # Look for the next section header
+            if config.section_header:
+                section_info = self._find_section_header_from_row(
+                    worksheet, config.section_header, current_row
+                )
+                if not section_info:
+                    # No more section headers found
+                    if self.debug:
+                        print(f"No more section headers found after row {current_row}")
+                    break
+
+                section_text, section_start_row, section_end_row = section_info
+                search_end_row = worksheet.max_row  # Search until end or next header
+            else:
+                # No section header - try to find next header row
+                if subtable_index > 0:
+                    # For subsequent subtables without section headers,
+                    # look for the next occurrence of column headers
+                    header_row = self._find_header_row(worksheet, current_row, config.columns)
+                    if not header_row:
+                        if self.debug:
+                            print(f"No more column headers found after row {current_row}")
+                        break
+                    # Back up to use the section-finding logic
+                    section_text = ""
+                    section_start_row = header_row
+                    section_end_row = header_row - 1
+                    search_end_row = worksheet.max_row
+                else:
+                    # First subtable without section header
+                    section_text = ""
+                    section_start_row = 1
+                    section_end_row = 0
+                    search_end_row = worksheet.max_row
+
+            # Extract this subtable
+            subtable_df = self._extract_single_subtable(
+                worksheet, sheet_name, config,
+                section_end_row + 1, search_end_row,
+                section_text=section_text,
+                subtable_index=subtable_index
+            )
+
+            if not subtable_df.empty:
+                all_subtables.append(subtable_df)
+                subtable_index += 1
+                consecutive_blank_rows = 0
+
+                # Move to the row after this subtable ends
+                last_row = subtable_df['row_number'].max()
+                current_row = last_row + 1
+
+                if self.debug:
+                    print(f"Extracted subtable {subtable_index} with {len(subtable_df)} rows")
+            else:
+                # No valid subtable found at this position
+                consecutive_blank_rows += 1
+                current_row = section_end_row + 1 if config.section_header else current_row + 1
+
+                # Check if we've exceeded the maximum blank rows between subtables
+                if consecutive_blank_rows >= config.max_blank_rows_between_subtables:
+                    if self.debug:
+                        print(f"Exceeded max blank rows between subtables ({config.max_blank_rows_between_subtables})")
+                    break
+
+        # Combine or return list based on configuration
+        if not all_subtables:
+            return pd.DataFrame()
+
+        if config.combine_subtables:
+            # Combine all subtables into one DataFrame
+            combined_df = pd.concat(all_subtables, ignore_index=True)
+            if self.debug:
+                print(f"Combined {len(all_subtables)} subtables into single DataFrame with {len(combined_df)} total rows")
+            return combined_df
+        else:
+            # Return list of DataFrames (user would need to handle this differently)
+            if self.debug:
+                print(f"Returning list of {len(all_subtables)} separate DataFrames")
+            return all_subtables
+
+    def _extract_single_subtable(self, worksheet, sheet_name: str, config: SubtableSearchConfig,
+                                  start_search_row: int, end_search_row: int,
+                                  section_text: str = None, subtable_index: int = 0) -> pd.DataFrame:
+        """
+        Extract a single subtable from the worksheet.
+
+        Args:
+            worksheet: The worksheet object
+            sheet_name: Name of the worksheet
+            config: Configuration for extraction
+            start_search_row: Row to start searching from
+            end_search_row: Row to stop searching at
+            section_text: Text of the section header (if found)
+            subtable_index: Index of this subtable (for multi-subtable extraction)
+
+        Returns:
+            DataFrame with extracted rows and metadata
+        """
+        # If section_text wasn't provided, try to find it
+        if section_text is None and config.section_header:
+            section_info = self._find_section_header_from_row(
+                worksheet, config.section_header, start_search_row
+            )
             if not section_info:
                 if self.debug:
-                    print("Section header not found, returning empty DataFrame")
+                    print(f"Section header not found starting from row {start_search_row}")
                 return pd.DataFrame()
-
             section_text, section_start_row, section_end_row = section_info
             search_start_row = section_end_row + 1
         else:
-            # No section header specified - start from row 1
-            if self.debug:
-                print("No section header configured, starting search from row 1")
-            section_text = ""  # Empty section text when no header
-            search_start_row = 1
+            search_start_row = start_search_row
+            if section_text is None:
+                section_text = ""
 
         # Find column headers - look for first non-empty row after section
         header_row = self._find_header_row(worksheet, search_start_row, config.columns)
         if not header_row:
             return pd.DataFrame()
-        
+
         column_mapping = self._find_column_headers(worksheet, header_row, config.columns, config)
         if not column_mapping:
             return pd.DataFrame()
-        
-        # Extract rows
+
+        # Extract rows (limiting to end_search_row)
         rows_data = self._extract_rows(
             worksheet,
             header_row + 1,
             column_mapping,
-            config
+            config,
+            max_row=end_search_row
         )
-        
+
         # Create DataFrame with metadata
         if not rows_data:
             return pd.DataFrame()
-        
+
         df = pd.DataFrame(rows_data)
-        
+
         # Add metadata columns
         df['section_header'] = section_text
         df['sheet_name'] = sheet_name
-        
+        df['subtable_index'] = subtable_index  # Add subtable index for tracking
+
         return df
     
     def _find_section_header(self, worksheet, header_config) -> Optional[Tuple[str, int, int]]:
         """
-        Find the section header in the worksheet.
-        
+        Find the section header in the worksheet starting from row 1.
+
+        Returns:
+            Tuple of (section_text, start_row, end_row) or None if not found
+        """
+        return self._find_section_header_from_row(worksheet, header_config, 1)
+
+    def _find_section_header_from_row(self, worksheet, header_config, start_row: int) -> Optional[Tuple[str, int, int]]:
+        """
+        Find the section header in the worksheet starting from a specific row.
+
+        Args:
+            worksheet: The worksheet to search in
+            header_config: Configuration for the section header
+            start_row: Row number to start searching from
+
         Returns:
             Tuple of (section_text, start_row, end_row) or None if not found
         """
         col_idx = ord(header_config.start_column.upper()) - ord('A') + 1
-        
+
         if self.debug:
-            print(f"Looking for section header starting at column {header_config.start_column} (idx: {col_idx})")
+            print(f"Looking for section header starting at column {header_config.start_column} (idx: {col_idx}), from row {start_row}")
             print(f"Pattern: {header_config.pattern.pattern}, Is merged: {header_config.is_merged}")
-        
-        for row in range(1, worksheet.max_row + 1):
+
+        for row in range(start_row, worksheet.max_row + 1):
             cell = worksheet.cell(row=row, column=col_idx)
             
             if header_config.is_merged:
@@ -237,12 +371,42 @@ class SubtableExtractor:
         if self.debug:
             print(f"  Found {len(column_mapping)} column headers total")
 
+        # Strict column validation - check for unexpected columns
+        if config.strict_columns:
+            unexpected_columns = []
+
+            for col_idx in range(1, worksheet.max_column + 1):
+                # Convert column index to letter (handles A-Z and AA-AZ)
+                col_letter = chr(ord('A') + col_idx - 1) if col_idx <= 26 else f"{chr(ord('A') + (col_idx - 1) // 26 - 1)}{chr(ord('A') + (col_idx - 1) % 26)}"
+
+                # Skip if this column is already mapped (either fixed or discovered)
+                if col_letter in column_mapping:
+                    continue
+
+                cell = worksheet.cell(row=header_row, column=col_idx)
+                if cell.value and str(cell.value).strip():
+                    # Found a non-empty, unmapped column
+                    unexpected_columns.append(f"{col_letter}: '{str(cell.value).strip()}'")
+
+            if unexpected_columns:
+                raise ValueError(
+                    f"Unexpected columns found in header row {header_row}: {', '.join(unexpected_columns)}. "
+                    f"Either add them to 'columns' config, 'discoverable_headers' patterns, or set strict_columns=False"
+                )
+
         return column_mapping
     
-    def _extract_rows(self, worksheet, start_row: int, column_mapping: Dict, config: SubtableSearchConfig) -> List[Dict]:
+    def _extract_rows(self, worksheet, start_row: int, column_mapping: Dict, config: SubtableSearchConfig, max_row: int = None) -> List[Dict]:
         """
         Extract valid rows from the worksheet based on configuration.
-        
+
+        Args:
+            worksheet: The worksheet to extract from
+            start_row: Row to start extraction from
+            column_mapping: Column mapping dictionary
+            config: Extraction configuration
+            max_row: Maximum row to extract to (None = worksheet.max_row)
+
         Returns:
             List of dictionaries representing valid rows with metadata
         """
@@ -250,8 +414,11 @@ class SubtableExtractor:
         current_row = start_row
         consecutive_invalid_rows = 0
         consecutive_blank_rows = 0
-        
-        while current_row <= worksheet.max_row:
+
+        if max_row is None:
+            max_row = worksheet.max_row
+
+        while current_row <= max_row:
             if self.debug:
                 print(f"  Processing row {current_row}")
             
@@ -310,15 +477,94 @@ class SubtableExtractor:
         
         return rows_data
     
+    def _extract_cell_value_with_type(self, cell) -> Any:
+        """
+        Extract cell value preserving the correct Python type based on Excel metadata.
+
+        This method intelligently converts Excel cell values to appropriate Python types
+        based on the cell's data_type, number_format, and other metadata.
+
+        Returns:
+            The cell value with the appropriate Python type (int, float, str, datetime, bool, None)
+        """
+        if cell.value is None:
+            return None
+
+        # String/Text cells (including text-formatted numbers like '100)
+        if cell.data_type == 's' or cell.data_type in ['str', 'inlineStr']:
+            return str(cell.value)
+
+        # Date cells
+        elif cell.data_type == 'd' or cell.is_date:
+            return cell.value  # Already a datetime object
+
+        # Numeric cells
+        elif cell.data_type == 'n':
+            val = cell.value
+
+            if val is None:
+                return 0.0
+
+            # Safe integer conversion for all whole numbers
+            if isinstance(val, (int, float)):
+                # Check if it's a whole number
+                if val == int(val):
+                    # Check if it's within safe integer range
+                    # Using 2^53 as the safe boundary (same as JavaScript's Number.MAX_SAFE_INTEGER)
+                    # This ensures compatibility across systems and prevents precision issues
+                    if -2**53 <= val <= 2**53:
+                        return int(val)
+                    # For very large whole numbers, keep as float to maintain precision
+
+            # Return as float for non-whole numbers or very large numbers
+            return float(val) if not isinstance(val, float) else val
+
+        # Boolean cells
+        elif cell.data_type == 'b':
+            return bool(cell.value)
+
+        # Formula cells (with data_only=True, we get the calculated value)
+        elif cell.data_type == 'f':
+            # The value type depends on the formula result
+            # Recurse with a synthetic cell-like object
+            class CellLike:
+                def __init__(self, value, data_type='n', number_format='General', is_date=False):
+                    self.value = value
+                    self.data_type = data_type
+                    self.number_format = number_format
+                    self.is_date = is_date
+
+            # Try to infer the type from the value
+            if isinstance(cell.value, bool):
+                return cell.value
+            elif isinstance(cell.value, (int, float)):
+                synthetic = CellLike(cell.value, 'n', cell.number_format, cell.is_date)
+                return self._extract_cell_value_with_type(synthetic)
+            else:
+                return cell.value
+
+        # Error cells
+        elif cell.data_type == 'e':
+            return f"#ERROR: {cell.value}"
+
+        # Fallback - preserve as-is
+        else:
+            return cell.value
+
     def _extract_single_row(self, worksheet, row_num: int, column_mapping: Dict) -> Dict:
-        """Extract data from a single row."""
+        """Extract data from a single row with proper type preservation."""
         row_data = {}
 
         for col_letter, col_info in column_mapping.items():
             cell = worksheet.cell(row=row_num, column=col_info['index'])
-            value = cell.value if cell.value is not None else ""
-            row_data[col_info['header_text']] = str(value) if value else ""
-            # ADD THIS LINE - Store cell coordinate for each value
+
+            # Use the new type-preserving extraction method
+            value = self._extract_cell_value_with_type(cell)
+
+            # Store the properly typed value
+            row_data[col_info['header_text']] = value if value is not None else ""
+
+            # Store cell coordinate for reference
             row_data[f"{col_info['header_text']}_coord"] = f"{col_letter}{row_num}"
 
         return row_data

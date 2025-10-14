@@ -49,14 +49,14 @@ class SubtableSearchConfig:
 
     Note: Blank rows are considered a type of invalid row.
     """
-    section_header: Optional[SectionHeaderConfig] = None  # Made optional - if None, search starts from row 1
     columns: List[ColumnConfig]
     row_validation: RowValidationConfig
-    
+    section_header: Optional[SectionHeaderConfig] = None  # Made optional - if None, search starts from row 1
+
     # Stop conditions based on consecutive row counts
     max_consecutive_invalid_rows: int = 0  # Stop after N consecutive invalid rows (includes blank) (0 = never)
     max_consecutive_blank_rows: int = 0  # Stop after N consecutive blank rows specifically (0 = never)
-    
+
     # Other stop conditions
     stop_on_merged_cell: bool = False  # Stop when encountering a merged cell
     end_pattern: Optional[Pattern[str]] = None  # Optional pattern to match for custom end condition
@@ -64,3 +64,12 @@ class SubtableSearchConfig:
 
     # ADD THIS NEW FIELD - List of patterns to discover anywhere in header row
     discoverable_headers: Optional[List[Pattern[str]]] = None
+
+    # Strict column validation - raise exception if unexpected columns found
+    strict_columns: bool = False
+
+    # Multi-subtable support
+    extract_multiple: bool = False  # Enable extraction of multiple subtables with same config
+    max_subtables: Optional[int] = None  # Maximum number of subtables to extract (None = unlimited)
+    max_blank_rows_between_subtables: int = 50  # Max blank rows to search before giving up
+    combine_subtables: bool = True  # Whether to combine into single DataFrame or return list

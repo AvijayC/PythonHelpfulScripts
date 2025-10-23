@@ -75,13 +75,16 @@ def normalize_expression(
     *,
     dialect: Optional[str] = None,
     allow_queries: bool = False,
+    sort_in_items: bool = True,
 ) -> str:
     """
-    Normalize a non-query expression with safe, schema-free simplification.
+    Normalize a non-query expression with safe, schema-free simplification and
+    canonical ordering for commutative boolean groups.
 
     Steps:
     - Strip redundant parentheses
     - Apply only a minimal simplify pass (if available)
+    - Canonicalize ordering within AND/OR groups (and optionally IN lists)
     - Render with normalize=True, pretty=False for stable output
 
     Set allow_queries=True to bypass the query guard, but note that this helper
@@ -103,7 +106,10 @@ def normalize_expression(
         # Fallback to just paren-stripped when optimizer API differs or is unavailable.
         simplified = cleaned
 
-    return simplified.sql(dialect=dialect, normalize=True, pretty=False)
+    # Canonicalize commutative boolean groups and (optionally) IN list items.
+    canon = _canonicalize_boolean_groups(simplified, dialect=dialect, sort_in_items=sort_in_items)
+
+    return canon.sql(dialect=dialect, normalize=True, pretty=False)
 
 
 def paren_insensitive_equal(a: exp.Expression, b: exp.Expression) -> bool:
@@ -120,3 +126,76 @@ __all__ = [
     "paren_insensitive_equal",
 ]
 
+
+# ---- Internal canonicalization helpers (ordering for commutative groups) ----
+
+def _stable_key(e: exp.Expression, dialect: Optional[str]) -> str:
+    """
+    Stable sort key for child expressions: strip redundant parentheses and render
+    with normalized casing/quoting so ordering is deterministic.
+    """
+    return strip_parens(e).sql(dialect=dialect, normalize=True, pretty=False)
+
+
+def _flatten_boolean(node: exp.Expression, kind: type[exp.Expression]) -> list[exp.Expression]:
+    """
+    Collect all child terms under a chain of the same boolean operator (AND/OR).
+    Returns the list of leaf expressions in no particular order.
+    """
+    parts: list[exp.Expression] = []
+
+    def collect(n: exp.Expression):
+        if isinstance(n, kind):
+            collect(n.this)
+            collect(n.expression)
+        else:
+            parts.append(n)
+
+    collect(node)
+    return parts
+
+
+def _rebuild_boolean(kind: type[exp.Expression], parts: list[exp.Expression]) -> exp.Expression:
+    """Rebuild a boolean chain (AND/OR) from a list of parts."""
+    if not parts:
+        raise ValueError("Cannot rebuild boolean node from empty parts")
+    if len(parts) == 1:
+        return parts[0]
+    return exp.and_(*parts) if kind is exp.And else exp.or_(*parts)
+
+
+def _canonicalize_boolean_groups(
+    root: exp.Expression,
+    *,
+    dialect: Optional[str],
+    sort_in_items: bool,
+) -> exp.Expression:
+    """
+    Make ordering of commutative boolean groups deterministic:
+      - strip redundant parentheses (caller already did)
+      - sort terms in AND and OR groups
+      - optionally sort IN(...) list items
+    """
+    def visit(n: exp.Expression) -> exp.Expression:
+        # First normalize children bottom-up
+        n = n.transform(visit)
+
+        if isinstance(n, exp.And):
+            parts = _flatten_boolean(n, exp.And)
+            parts.sort(key=lambda x: _stable_key(x, dialect))
+            return _rebuild_boolean(exp.And, parts)
+
+        if isinstance(n, exp.Or):
+            parts = _flatten_boolean(n, exp.Or)
+            parts.sort(key=lambda x: _stable_key(x, dialect))
+            return _rebuild_boolean(exp.Or, parts)
+
+        # Optional: sort items inside IN(...) for stability.
+        if sort_in_items and isinstance(n, exp.In) and n.args.get("expressions"):
+            items = list(n.args["expressions"])
+            items.sort(key=lambda x: _stable_key(x, dialect))
+            return exp.In(this=n.this, expressions=items, not_=n.args.get("not"))
+
+        return n
+
+    return visit(root)

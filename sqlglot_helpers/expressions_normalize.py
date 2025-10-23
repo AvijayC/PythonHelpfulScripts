@@ -176,10 +176,8 @@ def _canonicalize_boolean_groups(
       - sort terms in AND and OR groups
       - optionally sort IN(...) list items
     """
-    def visit(n: exp.Expression) -> exp.Expression:
-        # First normalize children bottom-up
-        n = n.transform(visit)
-
+    def canon(n: exp.Expression) -> exp.Expression:
+        # Transform visits children first (bottom-up), so they are already canonicalized.
         if isinstance(n, exp.And):
             parts = _flatten_boolean(n, exp.And)
             parts.sort(key=lambda x: _stable_key(x, dialect))
@@ -198,4 +196,4 @@ def _canonicalize_boolean_groups(
 
         return n
 
-    return visit(root)
+    return root.transform(canon)
